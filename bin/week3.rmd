@@ -1,0 +1,198 @@
+---
+title: "Project_1_rnaseq_Week3"
+output: github_document
+---
+
+```{r}
+library(tidyverse)
+library(DESeq2)
+library(ggplot2)
+```
+
+
+First, filter counts. This is done by removing genes with all zero counts, and keeping genes expressed. 
+in at least 3 samples with at least 1 count
+
+```{r}
+# Load the counts matrix, ensuring gene names are set as row names
+counts <- read_csv("results/verse_concat.csv") %>%
+  column_to_rownames(var = "gene")  # Ensure gene names are used as row names
+
+# Convert counts to numeric (in case they are read as characters)
+counts <- counts %>%
+  mutate(across(everything(), as.numeric))
+
+# Count genes before filtering
+genes_before <- nrow(counts)
+
+# Filtering step 1: Remove genes with all-zero counts
+filtered_counts <- counts[rowSums(counts) > 0, ]
+
+# Filtering step 2: Keep genes expressed in at least 3 samples with at least 1 count
+filtered_counts <- filtered_counts[rowSums(filtered_counts > 1) >= 3, ]
+```
+
+Check how many genes present before and after filtering and visualize
+```{r}
+# Count genes after filtering
+genes_after <- nrow(filtered_counts)
+
+# Report results
+cat("Genes before filtering:", genes_before, "\n")
+cat("Genes after filtering:", genes_after, "\n")
+
+# par(mfrow=c(1,2))
+hist(log10(rowSums(counts) + 1), main="Before Filtering", xlab="Log10 Sum", col="steelblue")
+hist(log10(rowSums(filtered_counts) + 1), main="After Filtering", xlab="Log10 Sum", col="darkred")
+```
+
+63241 genes were present before filtering, and now 28111 are present
+
+Next, run DESeq2 on the filtered counts, convert ensembls to gene symbols, and output top 10 results. And write csv containing this table
+
+```{r}
+sample_info <- data.frame(
+  row.names = colnames(filtered_counts),
+  condition = c("control", "control", "control", "exp", "exp", "exp")  # Adjust based on samples
+)
+
+# Ensure 'condition' is a factor (not character)
+sample_info$condition <- as.factor(sample_info$condition)
+
+# Create DESeq2 dataset from filtered counts
+dds <- DESeqDataSetFromMatrix(countData = filtered_counts, colData = sample_info, design = ~ condition)
+
+# Run DESeq2 analysis
+dds <- DESeq(dds)
+
+# Extract results
+res <- results(dds)
+
+# Convert results to dataframe and order by padj (adjusted p-value)
+res_df <- as.data.frame(res) %>%
+  rownames_to_column(var = "gene") %>%
+  arrange(padj)  # Sort by adjusted p-value (most significant first)
+
+id_map <- read_tsv("results/id2name.txt", col_names = c("gene", "gene_name"))
+
+res_df_named <- res_df %>%
+  left_join(id_map, by = "gene") %>%
+  mutate(gene_name = ifelse(is.na(gene_name), gene, gene_name))
+
+
+# Select only the relevant columns (gene name, log2FoldChange, padj)
+top10_genes_named <- res_df_named %>%
+  slice(1:10) %>%
+  select(gene_name, padj)  # Removed 'gene' column
+
+# Save updated top 10 genes table
+write_csv(top10_genes_named, "top10_significant_genes_named.csv")
+```
+
+A padj threshold was determined, and the signicant genes were output into a list 
+
+```{r}
+# next, select a p value threshold and report the number of genes that meet the criterion
+padj_threshold <- 0.05
+
+num_significant_genes <- sum(res_df_named$padj < 0.05, na.rm = TRUE)
+
+#report the results
+cat("Number of significant genes at padj <", padj_threshold, ":", num_significant_genes, "\n")
+
+# Extract significant genes (padj < 0.05)
+significant_genes <- res_df_named %>%
+  filter(padj < 0.05) %>%
+  pull(gene_name)  # Extract only gene names
+
+# Save list as a text file (one gene per line)
+write_lines(significant_genes, "significant_genes_list.txt")
+
+cat("Significant genes saved to significant_genes_list.txt\n")
+```
+
+Next, DAVID was run on these 1189 significant genes.
+
+After performing DAVID enrichment analysis on our 1,143 (some were not included due to inability to finding matching gene symbols
+for the ensembl ids) significant genes (padj < 0.05), we identified key biological processes, 
+cellular components, and molecular functions that are overrepresented in our dataset. These results provide insights into the 
+potential roles of differentially expressed genes and their involvement in various cellular activities.
+
+In the Biological Process (BP) category, we observed significant enrichment in pathways related to apoptosis, cell adhesion, 
+migration, proliferation, and hypoxia response. Notably, the apoptotic process (p = 1.6e-5) was highly enriched, suggesting 
+that many of the differentially expressed genes are involved in cell death regulation. Additionally, the response to hypoxia 
+(p = 4.8e-6) was significantly enriched, indicating potential oxygen-related stress responses. Other notable processes 
+include cell adhesion (p = 8.2e-9) and extracellular matrix organization (p = 3.5e-8), both of which are critical for tissue 
+remodeling, metastasis, and cell communication. Furthermore, positive regulation of cell population proliferation (p = 4.3e-7) 
+suggests possible involvement in growth signaling pathways, including those related to cancer progression.
+
+The Cellular Component (CC) enrichment analysis revealed that many of the significant genes are associated with membranes, 
+extracellular structures, and synaptic regions. The most highly enriched component was the plasma membrane (p = 8.6e-15), 
+suggesting that a substantial number of differentially expressed genes are membrane-associated and potentially involved in 
+signaling pathways. The extracellular matrix (p = 1.4e-6) was also highly significant, reinforcing the idea that these genes 
+play a role in cell adhesion, tissue organization, and intercellular communication. Interestingly, several synapse-related terms 
+were enriched, such as glutamatergic synapse (p = 7.7e-7) and GABAergic synapse (p = 2.9e-5), indicating a potential role for 
+these genes in neuronal signaling and synaptic activity.
+
+The Molecular Function (MF) analysis highlighted enrichment in protein binding, receptor activity, and ion binding functions. 
+The most significant term was calcium ion binding (p = 9.0e-11), suggesting involvement in calcium-mediated signaling pathways, 
+which are crucial for processes such as signal transduction, muscle contraction, and neurotransmission. Additionally, protein 
+homodimerization activity (p = 1.5e-6) was enriched, indicating that many of the differentially expressed genes are involved in 
+protein-protein interactions. Integrin binding (p = 3.6e-4) was another key term, reinforcing the role of cell adhesion and 
+extracellular signaling. Finally, DNA-binding transcription repressor activity (p = 6.4e-4) suggests that some of these genes 
+may be involved in transcriptional regulation and gene expression control.
+
+Overall, these findings indicate that the differentially expressed genes in this dataset are significantly associated with apoptosis,
+hypoxia response, and cell adhesion, processes that are essential for cell survival, stress adaptation, and tissue remodeling. The 
+enrichment of membrane-associated and extracellular matrix components suggests that these genes play key roles in intercellular 
+communication and signaling, while the molecular function analysis points to strong involvement in calcium signaling, protein 
+interactions, and transcriptional regulation. These results provide important insights into the biological implications of the 
+differential expression patterns observed in our dataset.
+
+Next, DESeq normalization was performed using vst 
+
+```{r}
+# Create DESeq2 dataset from filtered counts
+dds <- DESeqDataSetFromMatrix(countData = filtered_counts, colData = sample_info, design = ~ condition)
+
+# Apply variance stabilizing transformation
+vsd <- vst(dds, blind = TRUE)  # or use rlog(dds, blind = TRUE)
+
+# Extract normalized counts
+normalized_counts <- assay(vsd)
+
+# Save normalized counts to CSV
+write_csv(as.data.frame(normalized_counts) %>% rownames_to_column("gene"),
+          "normalized_counts.csv")
+```
+
+PCA was then performed on the normalized counts
+
+```{r}
+# Transpose the normalized counts matrix (PCA requires samples as rows)
+pca_data <- prcomp(t(normalized_counts), scale. = TRUE)
+
+# Extract PCA results
+pca_df <- as.data.frame(pca_data$x)
+pca_df$Sample <- rownames(pca_df)  # Add sample names
+
+# Add condition labels (modify accordingly)
+pca_df$Condition <- ifelse(grepl("control", pca_df$Sample), "Control", "Experiment")
+
+# View PCA variance explained
+print(summary(pca_data))
+
+```
+
+```{r}
+p <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Condition, label = Sample)) +
+  geom_point(size = 4) +
+  geom_text(vjust = -1) +
+  labs(title = "PCA of RNA-seq Data",
+       x = paste0("PC1: ", round(100 * summary(pca_data)$importance[2,1], 2), "% Variance"),
+       y = paste0("PC2: ", round(100 * summary(pca_data)$importance[2,2], 2), "% Variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+print(p)
+```
