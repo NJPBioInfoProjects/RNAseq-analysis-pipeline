@@ -1,16 +1,28 @@
 ---
-title: "Project_1_rnaseq_Week3"
+title: "normalization_and_DE"
 output: github_document
 ---
 
 ```{r}
-library(tidyverse)
-library(DESeq2)
-library(ggplot2)
+suppressWarnings(suppressPackageStartupMessages({
+  library(tidyverse)
+  library(DESeq2)
+  library(ggplot2)
+  library(msigdbr)
+  library(fgsea)
 ```
 
 
-First, filter counts. This is done by removing genes with all zero counts, and keeping genes expressed. 
+MultiQC observations:
+The per base sequence content module failed, which could potentially be from low read depth. The GC content followed a normal distributions, which is what
+was expected. In the Per Base N content module, it was seen that the N content was consitently low across all positions, which is a good quality indicator.
+In the Sequence Duplication Levels Module, a high proportion of duplicates at levels >10x was observed. This could be due to sequencing reads originating 
+from repetitive genomic regions, where short read lengths make it difficult to distinguish unique sequences. If the reads are not long enough to span unique
+breakpoints within these regions, they may be incorrectly detected as duplicates. The Per Sequence Quality SCores modules shows that nearly all reads have high
+Phred scores, indicating that the quality is generally very good across samples. Lastly, adapter content shows low levels of adapter contamination across samples,
+indicating that adapter trimming is likely unnecessary or has already been performed before this workflow was commenced. 
+
+Now onto the differential expression analysis. First, filter counts. This is done by removing genes with all zero counts, and keeping genes expressed 
 in at least 3 samples with at least 1 count
 
 ```{r}
@@ -41,7 +53,7 @@ genes_after <- nrow(filtered_counts)
 cat("Genes before filtering:", genes_before, "\n")
 cat("Genes after filtering:", genes_after, "\n")
 
-# par(mfrow=c(1,2))
+par(mfrow=c(1,2))
 hist(log10(rowSums(counts) + 1), main="Before Filtering", xlab="Log10 Sum", col="steelblue")
 hist(log10(rowSums(filtered_counts) + 1), main="After Filtering", xlab="Log10 Sum", col="darkred")
 ```
@@ -68,6 +80,10 @@ dds <- DESeq(dds)
 # Extract results
 res <- results(dds)
 
+```
+
+
+```{r}
 # Convert results to dataframe and order by padj (adjusted p-value)
 res_df <- as.data.frame(res) %>%
   rownames_to_column(var = "gene") %>%
@@ -82,8 +98,9 @@ res_df_named <- res_df %>%
 
 # Select only the relevant columns (gene name, log2FoldChange, padj)
 top10_genes_named <- res_df_named %>%
-  slice(1:10) %>%
-  select(gene_name, padj)  # Removed 'gene' column
+  arrange(padj) %>%
+  head(10) %>%  # Use head() instead of slice()
+  select(gene_name, padj)  # Keep only relevant columns
 
 # Save updated top 10 genes table
 write_csv(top10_genes_named, "top10_significant_genes_named.csv")
@@ -152,25 +169,24 @@ differential expression patterns observed in our dataset.
 Next, DESeq normalization was performed using vst 
 
 ```{r}
-# Create DESeq2 dataset from filtered counts
-dds <- DESeqDataSetFromMatrix(countData = filtered_counts, colData = sample_info, design = ~ condition)
-
 # Apply variance stabilizing transformation
-vsd <- vst(dds, blind = TRUE)  # or use rlog(dds, blind = TRUE)
+vsd <- rlog(dds, blind = FALSE)
+
+head(assay(vsd), 3)
 
 # Extract normalized counts
 normalized_counts <- assay(vsd)
-
-# Save normalized counts to CSV
-write_csv(as.data.frame(normalized_counts) %>% rownames_to_column("gene"),
-          "normalized_counts.csv")
 ```
 
 PCA was then performed on the normalized counts
 
 ```{r}
+pca_matrix <- t(normalized_counts)
+```
+
+```{r}
 # Transpose the normalized counts matrix (PCA requires samples as rows)
-pca_data <- prcomp(t(normalized_counts), scale. = TRUE)
+pca_data <- prcomp(pca_matrix, scale. = FALSE)
 
 # Extract PCA results
 pca_df <- as.data.frame(pca_data$x)
@@ -195,4 +211,117 @@ p <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Condition, label = Sample)) +
   theme(legend.position = "top")
 
 print(p)
+```
+
+Next, a heatmap was generated to visualize the the sample to sample distances for
+this experiment
+
+```{r}
+library(pheatmap)
+
+# Compute Euclidean distance between samples
+sample_dists <- dist(pca_matrix)  # Rows are samples
+
+# Convert to a matrix (pheatmap requires matrix input)
+sample_dist_matrix <- as.matrix(sample_dists)
+
+# Create the heatmap
+pheatmap(sample_dist_matrix,
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "complete",
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         main = "Sample-to-Sample Distance Heatmap")dfdoes
+```
+
+The PCA plot reveals a clear separation between the control and experimental groups, indicating 
+that the treatment has a significant effect on gene expression. PC1, which explains 62.7% of 
+the variance, primarily drives this separation, suggesting that the experimental condition is 
+the dominant source of variability in the dataset. The clustering of control samples together and 
+experimental samples together confirms that the biological replicates are consistent within 
+each condition. However, exp_rep3 appears slightly distant from exp_rep1 and exp_rep2, suggesting
+potential variability within the experimental group. This could be due to biological differences,
+technical variation, or batch effects and may warrant further investigation.
+
+The sample-to-sample distance heatmap reinforces these findings by showing that control samples 
+are more similar to each other (low Euclidean distance), while experimental samples form a 
+separate cluster with higher distances from controls. The hierarchical clustering confirms 
+the distinct grouping of the two conditions, further supporting the notion that the treatment 
+has a strong impact on gene expression. Additionally, exp_rep3 appears slightly different from 
+the other experimental replicates, consistent with the PCA results. This may indicate variability 
+in response to the treatment or technical differences in sequencing depth or batch effects. 
+Overall, these analyses confirm the biological relevance of the experiment while also highlighting
+a potential outlier that should be further examined.
+
+Next, a fgsea will be 
+
+```{r}
+# Load DESeq2 results
+results_df <- as.data.frame(res)  # Ensure it contains log2FoldChange and p-value
+
+results_df <- results_df %>% 
+  rownames_to_column(var = "Ensembl_ID") #this converts the rownames to a real column (6 -> columns)
+
+id_2_map <- read_tsv('id2name.txt', col_names = c("Ensembl_ID", "Gene_Symbol"))
+
+results_df <- results_df %>%
+  left_join(id_2_map, by = "Ensembl_ID")
+
+results_df <- results_df %>%
+  select(Gene_Symbol, everything()) %>%
+  filter(!grepl("^ENSG", Gene_Symbol)) %>%
+  select(-Ensembl_ID) %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  distinct(Gene_Symbol, .keep_all = TRUE)
+
+
+ranked_genes <- setNames(results_df$log2FoldChange, results_df$Gene_Symbol)
+
+```
+
+Next, get the C2 canonical pathways from msigdb
+```{r}
+pathways <- msigdbr(species = "Homo sapiens", category = "C2") %>%
+  split(x = .$gene_symbol, f = .$gs_name)
+```
+
+Run the FGSEA
+```{r}
+set.seed(123)  # For reproducibility
+fgsea_results <- fgsea(pathways = pathways, 
+                       stats = ranked_genes, 
+                       minSize = 10,  # Minimum genes in a pathway
+                       maxSize = 1000) # Maximum genes in a pathway
+```
+
+Filter the significant pathways
+```{r}
+# Choose a significance threshold (adjusted p-value < 0.05)
+fgsea_sig <- fgsea_results %>% 
+  filter(padj < 0.05) %>% 
+  arrange(padj)
+```
+
+Visualize the top pathways
+```{r}
+ggplot(fgsea_sig[1:10, ], aes(reorder(pathway, NES), NES, fill = padj)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_gradient(low = "red", high = "blue") +
+  theme_minimal() +
+  labs(title = "Top Enriched Pathways (FGSEA)",
+       x = "Pathway",
+       y = "Normalized Enrichment Score (NES)")
+```
+
+The FGSEA results reveal significant downregulation of p53 target genes (FISCHER_DIRECT_P53_TARGETS_META_ANALYSIS), suggesting a potential suppression of
+p53-mediated tumor suppression or stress response pathways. Additionally, multiple pathways related to H3K27me3-associated gene silencing
+(MEISSNER_NPC_HCP_WITH_H3K4ME2_AND_H3K27ME3, MIKKELSEN_HCP_WITH_H3K27ME3) are enriched, indicating possible epigenetic regulation changes affecting gene
+expression. The downregulation of the REACTOME_NEURONAL_SYSTEM pathway suggests potential neurodevelopmental or neuronal signaling alterations, which could
+be relevant depending on the experimental context. The NABA_MATRISOME pathway, linked to extracellular matrix components, may indicate changes in cell
+adhesion, migration, or tissue remodeling. Overall, these results suggest a coordinated biological shift involving tumor suppression, chromatin remodeling,
+and cellular structure, warranting further investigation into the key genes driving these pathways.
+
+```{r session-info}
+sessionInfo()
 ```
