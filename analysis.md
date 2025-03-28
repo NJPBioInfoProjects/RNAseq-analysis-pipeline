@@ -1,0 +1,858 @@
+normalization_and_DE_analysis
+================
+
+``` r
+suppressWarnings(suppressPackageStartupMessages({
+  library(tidyverse)
+  library(DESeq2)
+  library(ggplot2)
+  library(fgsea)
+  library(ggrepel)
+}))
+```
+
+# MultiQC observations:
+
+The per base sequence content module failed, which could potentially be
+from low read depth. The GC content followed a normal distributions,
+which is what was expected. In the Per Base N content module, it was
+seen that the N content was consitently low across all positions, which
+is a good quality indicator. In the Sequence Duplication Levels Module,
+a high proportion of duplicates at levels \>10x was observed. This could
+be due to sequencing reads originating from repetitive genomic regions,
+where short read lengths make it difficult to distinguish unique
+sequences. If the reads are not long enough to span unique breakpoints
+within these regions, they may be incorrectly detected as duplicates.
+The Per Sequence Quality SCores modules shows that nearly all reads have
+high Phred scores, indicating that the quality is generally very good
+across samples. Lastly, adapter content shows low levels of adapter
+contamination across samples, indicating that adapter trimming is likely
+unnecessary or has already been performed before this workflow was
+commenced.
+
+Now onto the differential expression analysis. First, filter counts.
+This is done by removing genes with all zero counts, and keeping genes
+expressed in at least 3 samples with at least 1 count
+
+``` r
+# Load the counts matrix, ensuring gene names are set as row names
+counts <- read_csv("results/verse_concat.csv") %>%
+  column_to_rownames(var = "gene")  # Ensure gene names are used as row names
+```
+
+    ## Rows: 63241 Columns: 7
+    ## ── Column specification ────────────────────────────────────────────────────────
+    ## Delimiter: ","
+    ## chr (1): gene
+    ## dbl (6): control_rep1, control_rep2, control_rep3, exp_rep1, exp_rep2, exp_rep3
+    ## 
+    ## ℹ Use `spec()` to retrieve the full column specification for this data.
+    ## ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+``` r
+# Convert counts to numeric (in case they are read as characters)
+counts <- counts %>%
+  mutate(across(everything(), as.numeric))
+
+# Count genes before filtering
+genes_before <- nrow(counts)
+
+# Filtering step 1: Remove genes with all-zero counts
+filtered_counts <- counts[rowSums(counts) > 0, ]
+
+# Filtering step 2: Keep genes expressed in at least 3 samples with at least 1 count
+filtered_counts <- filtered_counts[rowSums(filtered_counts > 1) >= 3, ]
+```
+
+Check how many genes present before and after filtering and visualize
+
+``` r
+# Count genes after filtering
+genes_after <- nrow(filtered_counts)
+
+# Report results
+cat("Genes before filtering:", genes_before, "\n")
+```
+
+    ## Genes before filtering: 63241
+
+``` r
+cat("Genes after filtering:", genes_after, "\n")
+```
+
+    ## Genes after filtering: 28111
+
+``` r
+par(mfrow=c(1,2))
+hist(log10(rowSums(counts) + 1), main="Before Filtering", xlab="Log10 Sum", col="steelblue")
+hist(log10(rowSums(filtered_counts) + 1), main="After Filtering", xlab="Log10 Sum", col="darkred")
+```
+
+![](analysis_files/figure-gfm/unnamed-chunk-3-1.png)<!-- -->
+
+63241 genes were present before filtering, and now 28111 are present
+
+Next, run DESeq2 on the filtered counts, convert ensembls to gene
+symbols, and output top 10 results. And write csv containing this table
+
+``` r
+sample_info <- tibble(c("control_rep1", "control_rep2", "control_rep3", "exp_rep1", "exp_rep2", "exp_rep3"), condition = c("control", "control", "control", "exp", "exp", "exp"))
+
+# Create DESeq2 dataset from filtered counts
+dds <- DESeqDataSetFromMatrix(countData = filtered_counts, colData = sample_info, design = ~ condition)
+```
+
+    ## converting counts to integer mode
+
+    ## Warning in DESeqDataSet(se, design = design, ignoreRank): some variables in
+    ## design formula are characters, converting to factors
+
+``` r
+# Run DESeq2 analysis
+dds <- DESeq(dds)
+```
+
+    ## estimating size factors
+
+    ## estimating dispersions
+
+    ## gene-wise dispersion estimates
+
+    ## mean-dispersion relationship
+
+    ## final dispersion estimates
+
+    ## fitting model and testing
+
+``` r
+# Extract results
+res <- results(dds)
+```
+
+``` r
+# Convert results to dataframe and order by padj (adjusted p-value)
+res_df <- as.data.frame(res) %>%
+  rownames_to_column(var = "gene") %>%
+  arrange(padj)  # Sort by adjusted p-value (most significant first)
+
+id_map <- read_tsv("results/id2name.txt", col_names = c("gene", "gene_name"))
+```
+
+    ## Rows: 63242 Columns: 2
+    ## ── Column specification ────────────────────────────────────────────────────────
+    ## Delimiter: "\t"
+    ## chr (2): gene, gene_name
+    ## 
+    ## ℹ Use `spec()` to retrieve the full column specification for this data.
+    ## ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+``` r
+res_df_named <- res_df %>%
+  left_join(id_map, by = "gene") %>%
+  mutate(gene_name = ifelse(is.na(gene_name), gene, gene_name))
+
+
+# Select only the relevant columns (gene name, log2FoldChange, padj)
+top10_genes_named <- res_df_named %>%
+  arrange(padj) %>%
+  head(10) %>%  # Use head() instead of slice()
+  select(gene_name, padj)  # Keep only relevant columns
+
+# Save updated top 10 genes table
+write_csv(top10_genes_named, "top10_significant_genes_named.csv")
+```
+
+A padj threshold was determined, and the signicant genes were output
+into a list
+
+``` r
+# next, select a p value threshold and report the number of genes that meet the criterion
+padj_threshold <- 0.05
+
+num_significant_genes <- sum(res_df_named$padj < 0.05, na.rm = TRUE)
+
+#report the results
+cat("Number of significant genes at padj <", padj_threshold, ":", num_significant_genes, "\n")
+```
+
+    ## Number of significant genes at padj < 0.05 : 1189
+
+``` r
+# Extract significant genes (padj < 0.05)
+significant_genes <- res_df_named %>%
+  filter(padj < 0.05) %>%
+  pull(gene_name)  # Extract only gene names
+
+# Save list as a text file (one gene per line)
+write_lines(significant_genes, "significant_genes_list.txt")
+
+head(significant_genes, 10)
+```
+
+    ##  [1] "RPS4Y1"          "ENSG00000289575" "PNPO"            "PCDHGA10"       
+    ##  [5] "YPEL3-DT"        "LINC02506"       "ENSG00000289456" "ENSG00000286339"
+    ##  [9] "ENSG00000282914" "SVIL-AS1"
+
+Next, DAVID was run on these 1189 significant genes.
+
+# DAVID Analysis
+
+After performing DAVID enrichment analysis on our 1,143 (some were not
+included due to inability to finding matching gene symbols for the
+ensembl ids) significant genes (padj \< 0.05), we identified key
+biological processes, cellular components, and molecular functions that
+are overrepresented in our dataset. These results provide insights into
+the potential roles of differentially expressed genes and their
+involvement in various cellular activities.
+
+In the Biological Process (BP) category, we observed significant
+enrichment in pathways related to apoptosis, cell adhesion, migration,
+proliferation, and hypoxia response. Notably, the apoptotic process (p =
+1.6e-5) was highly enriched, suggesting that many of the differentially
+expressed genes are involved in cell death regulation. Additionally, the
+response to hypoxia (p = 4.8e-6) was significantly enriched, indicating
+potential oxygen-related stress responses. Other notable processes
+include cell adhesion (p = 8.2e-9) and extracellular matrix organization
+(p = 3.5e-8), both of which are critical for tissue remodeling,
+metastasis, and cell communication. Furthermore, positive regulation of
+cell population proliferation (p = 4.3e-7) suggests possible involvement
+in growth signaling pathways, including those related to cancer
+progression.
+
+The Cellular Component (CC) enrichment analysis revealed that many of
+the significant genes are associated with membranes, extracellular
+structures, and synaptic regions. The most highly enriched component was
+the plasma membrane (p = 8.6e-15), suggesting that a substantial number
+of differentially expressed genes are membrane-associated and
+potentially involved in signaling pathways. The extracellular matrix (p
+= 1.4e-6) was also highly significant, reinforcing the idea that these
+genes play a role in cell adhesion, tissue organization, and
+intercellular communication. Interestingly, several synapse-related
+terms were enriched, such as glutamatergic synapse (p = 7.7e-7) and
+GABAergic synapse (p = 2.9e-5), indicating a potential role for these
+genes in neuronal signaling and synaptic activity.
+
+The Molecular Function (MF) analysis highlighted enrichment in protein
+binding, receptor activity, and ion binding functions. The most
+significant term was calcium ion binding (p = 9.0e-11), suggesting
+involvement in calcium-mediated signaling pathways, which are crucial
+for processes such as signal transduction, muscle contraction, and
+neurotransmission. Additionally, protein homodimerization activity (p =
+1.5e-6) was enriched, indicating that many of the differentially
+expressed genes are involved in protein-protein interactions. Integrin
+binding (p = 3.6e-4) was another key term, reinforcing the role of cell
+adhesion and extracellular signaling. Finally, DNA-binding transcription
+repressor activity (p = 6.4e-4) suggests that some of these genes may be
+involved in transcriptional regulation and gene expression control.
+
+Overall, these findings indicate that the differentially expressed genes
+in this dataset are significantly associated with apoptosis, hypoxia
+response, and cell adhesion, processes that are essential for cell
+survival, stress adaptation, and tissue remodeling. The enrichment of
+membrane-associated and extracellular matrix components suggests that
+these genes play key roles in intercellular communication and signaling,
+while the molecular function analysis points to strong involvement in
+calcium signaling, protein interactions, and transcriptional regulation.
+These results provide important insights into the biological
+implications of the differential expression patterns observed in our
+dataset.
+
+Next, DESeq normalization was performed using vst
+
+``` r
+# Apply variance stabilizing transformation
+vsd <- vst(dds, blind = FALSE)
+
+head(assay(vsd), 3)
+```
+
+    ##                   control_rep1 control_rep2 control_rep3 exp_rep1 exp_rep2
+    ## ENSG00000227232.6     8.448807     8.537627     8.599257 8.489807 8.627630
+    ## ENSG00000243485.5     7.078476     7.033551     7.062293 7.152231 7.150251
+    ## ENSG00000238009.7     7.023229     7.093056     7.011775 7.075462 6.889690
+    ##                   exp_rep3
+    ## ENSG00000227232.6 8.700382
+    ## ENSG00000243485.5 7.022326
+    ## ENSG00000238009.7 7.119262
+
+PCA was then performed on the normalized counts
+
+``` r
+plotPCA(vsd, intgroup=c("condition"))
+```
+
+    ## using ntop=500 top features by variance
+
+![](analysis_files/figure-gfm/unnamed-chunk-8-1.png)<!-- -->
+
+Next, a heatmap was generated to visualize the the sample to sample
+distances for this experiment
+
+``` r
+library(pheatmap)
+library(RColorBrewer)
+
+# Compute Euclidean distance between samples
+sample_dists <- dist(t(assay(vsd)))  # Rows are samples
+
+# Convert to a matrix (pheatmap requires matrix input)
+sample_dist_matrix <- as.matrix(sample_dists)
+
+# Create the heatmap
+pheatmap(sample_dist_matrix,
+         clustering_distance_rows = sample_dists,
+         clustering_distance_cols = sample_dists,
+         color = colorRampPalette(rev(brewer.pal(9, "Blues")))(255),
+         main = "Sample-to-Sample Distance Heatmap")
+```
+
+![](analysis_files/figure-gfm/unnamed-chunk-9-1.png)<!-- -->
+
+The PCA plot shows a clear separation between the control and
+experimental groups, with PC1 (86% of the variance) driving most of the
+difference in gene expression. This indicates that the experimental
+condition is the primary source of variation in the dataset. The control
+samples cluster closely at the negative side of PC1, whereas two of the
+experimental replicates cluster together at the positive side. Notably,
+one experimental replicate positions itself away from the other two,
+suggesting possible variability within the experimental group—whether
+due to biological differences, technical variation, or batch effects.
+Overall, the clustering patterns confirm good consistency among the
+biological replicates within each group, but the outlier may merit
+further investigation.
+
+The sample-to-sample distance heatmap reinforces these findings by
+showing that control samples are more similar to each other (low
+Euclidean distance), while experimental samples form a separate cluster
+with higher distances from controls. The hierarchical clustering
+confirms the distinct grouping of the two conditions, further supporting
+the notion that the treatment has a strong impact on gene expression.
+Additionally, exp_rep3 appears slightly different from the other
+experimental replicates, consistent with the PCA results. This may
+indicate variability in response to the treatment or technical
+differences in sequencing depth or batch effects. Overall, these
+analyses confirm the biological relevance of the experiment while also
+highlighting a potential outlier that should be further examined.
+
+Next, a fgsea will be performed
+
+``` r
+res_df_named_unique <- res_df_named %>%
+  arrange(desc(log2FoldChange)) %>%
+  drop_na(log2FoldChange) %>%
+  distinct(gene_name, .keep_all = TRUE)
+
+ranked_genes <- res_df_named_unique %>% 
+  pull(log2FoldChange, gene_name)
+```
+
+Load in pathways
+
+``` r
+pathways <- fgsea::gmtPathways('c2.cp.v2024.1.Hs.symbols.gmt')
+```
+
+Run the FGSEA
+
+``` r
+set.seed(123)  # For reproducibility
+fgsea_results <- fgsea(pathways = pathways, 
+                       stats = ranked_genes, 
+                       minSize = 15,  # Minimum genes in a pathway
+                       maxSize = 500) # Maximum genes in a pathway
+```
+
+    ## Warning in preparePathwaysAndStats(pathways, stats, minSize, maxSize, gseaParam, : There are ties in the preranked stats (1.19% of the list).
+    ## The order of those tied genes will be arbitrary, which may produce unexpected results.
+
+``` r
+fgsea_results <- fgsea_results %>% as_tibble()
+```
+
+Filter the significant pathways
+
+``` r
+# Choose a significance threshold (adjusted p-value < 0.05)
+fgsea_sig <- fgsea_results %>% 
+  filter(padj < 0.05) %>% 
+  arrange(padj)
+```
+
+``` r
+fgsea_results %>% filter(NES < 0) %>% arrange(padj)
+```
+
+    ## # A tibble: 1,104 × 8
+    ##    pathway                   pval    padj log2err     ES   NES  size leadingEdge
+    ##    <chr>                    <dbl>   <dbl>   <dbl>  <dbl> <dbl> <int> <list>     
+    ##  1 REACTOME_NEURONAL_SYS… 9.79e-9 2.34e-5   0.748 -0.463 -1.76   389 <chr [126]>
+    ##  2 WP_ADHD_AND_AUTISM_AS… 5.87e-6 4.68e-3   0.611 -0.428 -1.61   344 <chr [85]> 
+    ##  3 REACTOME_TRANSMISSION… 3.30e-5 1.78e-2   0.557 -0.443 -1.63   254 <chr [79]> 
+    ##  4 REACTOME_ACTIVATION_O… 8.33e-5 2.49e-2   0.538 -0.609 -1.83    59 <chr [1]>  
+    ##  5 WP_SYNAPTIC_VESICLE_P… 1.12e-4 2.99e-2   0.538 -0.632 -1.84    50 <chr [16]> 
+    ##  6 REACTOME_NEUROTRANSMI… 1.25e-4 2.99e-2   0.519 -0.466 -1.66   191 <chr [58]> 
+    ##  7 REACTOME_REGULATION_O… 1.57e-4 3.42e-2   0.519 -0.667 -1.90    42 <chr [18]> 
+    ##  8 REACTOME_INCRETIN_SYN… 2.43e-4 4.46e-2   0.519 -0.742 -1.84    23 <chr [9]>  
+    ##  9 WP_CELL_LINEAGE_MAP_F… 5.67e-4 9.04e-2   0.477 -0.506 -1.71   119 <chr [54]> 
+    ## 10 REACTOME_SARS_COV_1_M… 7.73e-4 9.45e-2   0.477 -0.653 -1.79    36 <chr [1]>  
+    ## # ℹ 1,094 more rows
+
+``` r
+fgsea_results %>% filter(NES > 0) %>% arrange(padj)
+```
+
+    ## # A tibble: 1,286 × 8
+    ##    pathway                    pval    padj log2err    ES   NES  size leadingEdge
+    ##    <chr>                     <dbl>   <dbl>   <dbl> <dbl> <dbl> <int> <list>     
+    ##  1 KEGG_MEDICUS_REFERENCE… 2.11e-6 0.00252   0.627 0.878  1.99    16 <chr [2]>  
+    ##  2 BIOCARTA_IGF1MTOR_PATH… 3.73e-5 0.0178    0.557 0.837  1.95    19 <chr [2]>  
+    ##  3 PID_P53_DOWNSTREAM_PAT… 5.78e-5 0.0230    0.557 0.521  1.74   135 <chr [55]> 
+    ##  4 REACTOME_ASSEMBLY_OF_C… 8.00e-5 0.0249    0.538 0.630  1.86    60 <chr [26]> 
+    ##  5 BIOCARTA_IGF1_PATHWAY   1.75e-4 0.0350    0.519 0.780  1.85    20 <chr [2]>  
+    ##  6 PID_INTEGRIN1_PATHWAY   4.79e-4 0.0817    0.498 0.576  1.73    66 <chr [32]> 
+    ##  7 BIOCARTA_NFAT_PATHWAY   7.91e-4 0.0945    0.477 0.606  1.72    48 <chr [4]>  
+    ##  8 BIOCARTA_TFF_PATHWAY    7.59e-4 0.0945    0.477 0.734  1.78    22 <chr [4]>  
+    ##  9 REACTOME_COLLAGEN_DEGR… 7.81e-4 0.0945    0.477 0.578  1.71    61 <chr [27]> 
+    ## 10 PID_TAP63_PATHWAY       9.67e-4 0.108     0.477 0.596  1.72    54 <chr [23]> 
+    ## # ℹ 1,276 more rows
+
+Visualize the top pathways
+
+``` r
+# Identify the top 10 positively enriched and top 10 negatively enriched pathways
+pos_paths <- fgsea_results %>% 
+  slice_max(NES, n = 10) %>% 
+  pull(pathway)
+
+neg_paths <- fgsea_results %>% 
+  slice_min(NES, n = 10) %>% 
+  pull(pathway)
+
+# Filter to those pathways, convert them to factors, and tidy up the names
+plot_data <- fgsea_results %>% 
+  filter(pathway %in% c(pos_paths, neg_paths)) %>%
+  mutate(
+    # Make 'pathway' a factor
+    pathway = factor(pathway),
+    # Create a separate label that replaces underscores with spaces
+    label = str_replace_all(pathway, "_", " ")
+  )
+
+# Build the bar chart
+ggplot(plot_data, aes(x = fct_reorder(label, NES), y = NES, fill = NES > 0)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue")) +
+  coord_flip() +
+  theme_minimal(base_size = 8) +
+  labs(
+    title = "fgsea results for C2 MSigDB gene sets",
+    x = NULL,
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 80))
+```
+
+![](analysis_files/figure-gfm/unnamed-chunk-15-1.png)<!-- -->
+
+Here you can see that several positively enriched pathways (red bars)
+center on growth factor (IGF1/IGF1R) and mTOR signaling, extracellular
+matrix assembly (collagen), and p53‐related pathways—processes generally
+involved in cell proliferation, survival, and tissue structure. It’s
+also interesting that heart development and integrin‐mediated adhesion
+pathways appear at the top, suggesting potential changes in tissue
+remodeling or cardiovascular‐related processes.
+
+On the negatively enriched side (blue bars), there is an emphasis on
+pathways controlling translation machinery (including SARS‐CoV‐related
+modulation of translation) and neuronal/β‐cell function (e.g., GLP1
+secretion, dopaminergic pathways, and beta‐cell development). These
+results could indicate that while proliferative and survival signaling
+are upregulated, certain metabolic and neuronal regulatory pathways
+might be comparatively downregulated in these samples.
+
+``` r
+selected <- c('ELMO1', 'PAK3', 'INSM1', 'NEUROG3', 'GAB2', 'NOS3', 'PAX6', 'NEUROD1', 'ONECUT1', 'KRAS', 'LAMB2', 'SPP1', 'DUSP6', 'SPRY2', 'PLAT', 'AKT3', 'SLC2A2', 'BAX', 'COL2A1', 'APOE', 'LAMA4', 'KDR', 'PGF', 'PTPRU', 'COL9A2', 'NTRK2')
+
+labeled_results <- res_df_named_unique %>%
+  mutate(label = ifelse(gene_name %in% selected, TRUE, FALSE))
+```
+
+# DE Results Comparison
+
+In the paper, they found 319 genes were up regulated and 412 were down
+regulated in TYK2 KO cells compared to wildtype.
+
+``` r
+library(dplyr)
+
+sig_genes <- res_df_named_unique %>%
+  filter(padj < 0.05) %>%
+  mutate(direction = ifelse(log2FoldChange > 0, "Up", "Down"))
+
+sig_counts <- sig_genes %>%
+  group_by(direction) %>%
+  summarise(n = n())
+
+sig_counts
+```
+
+    ## # A tibble: 2 × 2
+    ##   direction     n
+    ##   <chr>     <int>
+    ## 1 Down        657
+    ## 2 Up          531
+
+Using the same padj threshold and no log2FC threshold, my results showed
+531 genes up regulated, and 657 were down regulated
+
+# Enrichment Results Comparison
+
+Our enrichment analyses show similar overarching biological themes
+across the different methods. Both the paper’s fgsea analysis and my
+DAVID/GSEA analysis point to disruptions in pathways involved in cell
+cycle regulation and endocrine development. For example, the paper
+reported significant alterations in receptor tyrosine kinase signaling
+and gene sets associated with β-cell development, which are in line with
+the trends observed in my analyses. This consistency suggests that the
+key biological processes affected by TYK2 perturbation are robust across
+different enrichment approaches.
+
+However, there are also notable differences in the details of the
+enrichment results. The paper primarily used Reactome gene sets, while
+DAVID and GSEA analyses rely on different databases such as KEGG and GO,
+which can lead to variations in the specific pathways identified as
+significant. Additionally, methodological differences—GSEA being a
+rank-based method that considers the entire gene list versus DAVID’s
+cutoff-based approach—result in discrepancies in pathway ranking,
+statistical significance, and the overall number of enriched pathways.
+These differences underscore how the choice of gene set collection and
+analytical strategy can influence the interpretation of the underlying
+biology.
+
+# Methods
+
+Pipeline Implementation and Execution The RNA-seq analysis was
+implemented using a custom Nextflow pipeline (Nextflow v24.04.2), which
+orchestrates modular processes for reproducible analysis. The pipeline
+is defined in a series of Nextflow modules managed via the
+nextflow.config file, ensuring consistent software environments.
+
+Quality Control and Preprocessing Raw sequencing reads were initially
+assessed for quality using FastQC (v0.12.1). Quality control reports
+were then aggregated with MultiQC (v1.25) to generate an overall summary
+of read quality. Reads passing quality control were used in subsequent
+steps.
+
+Gene Annotation and STAR Index Construction Gene annotations were parsed
+from a provided GTF file using a dedicated GTF_PARSE module. A STAR
+index was then generated from the GRCh38 reference genome and the parsed
+GTF annotations (STAR v2.7.11b), which prepares the reference for
+efficient alignment.
+
+Alignment and Quantification Quality-filtered reads were aligned to the
+indexed reference genome using the STAR alignment (STAR v2.7.11b).
+Aligned reads were then quantified at the gene level using VERSE
+(v0.1.5), which counts reads mapping to genomic features based on the
+provided GTF file. The count files from individual samples were
+concatenated using the CONCAT module to produce a comprehensive count
+matrix.
+
+Differential Expression and Functional Enrichment Gene counts were
+subsequently imported into R (v4.4.0) for differential expression
+analysis using DESeq2. Genes with an adjusted p-value \< 0.05 were
+deemed significantly differentially expressed, with upregulation and
+downregulation defined by the sign of the log₂ fold change. Functional
+enrichment analysis was performed on the significant gene set using
+fgsea and DAVID, comparing against gene set collections from Reactome,
+KEGG, and GO. Enriched pathways were considered significant based on an
+adjusted p-value threshold of \< 0.05.
+
+Visualization and Reporting Final data visualizations—including PCA
+plots, volcano plots, and enrichment bar charts—were generated in an R
+Markdown report using ggplot2 and dplyr. These visualizations provided
+insights into differential gene expression and pathway enrichment, and
+facilitated direct comparisons with published results.
+
+Reproducibility and Environment Management The Nextflow pipeline ensured
+reproducibility by executing each module within containerized
+environments as specified in the configuration file. This approach
+guaranteed that all processes (FastQC, MultiQC, STAR, VERSE, etc.) ran
+with the intended versions and parameters across different computational
+platforms.
+
+``` r
+sessionInfo()
+```
+
+    ## R version 4.4.0 (2024-04-24)
+    ## Platform: x86_64-pc-linux-gnu
+    ## Running under: AlmaLinux 8.10 (Cerulean Leopard)
+    ## 
+    ## Matrix products: default
+    ## BLAS/LAPACK: FlexiBLAS NETLIB;  LAPACK version 3.11.0
+    ## 
+    ## locale:
+    ##  [1] LC_CTYPE=en_US.UTF-8       LC_NUMERIC=C              
+    ##  [3] LC_TIME=en_US.UTF-8        LC_COLLATE=en_US.UTF-8    
+    ##  [5] LC_MONETARY=en_US.UTF-8    LC_MESSAGES=en_US.UTF-8   
+    ##  [7] LC_PAPER=en_US.UTF-8       LC_NAME=C                 
+    ##  [9] LC_ADDRESS=C               LC_TELEPHONE=C            
+    ## [11] LC_MEASUREMENT=en_US.UTF-8 LC_IDENTIFICATION=C       
+    ## 
+    ## time zone: America/New_York
+    ## tzcode source: system (glibc)
+    ## 
+    ## attached base packages:
+    ## [1] stats4    stats     graphics  grDevices utils     datasets  methods  
+    ## [8] base     
+    ## 
+    ## other attached packages:
+    ##  [1] RColorBrewer_1.1-3          pheatmap_1.0.12            
+    ##  [3] ggrepel_0.9.5               fgsea_1.30.0               
+    ##  [5] DESeq2_1.44.0               SummarizedExperiment_1.34.0
+    ##  [7] Biobase_2.64.0              MatrixGenerics_1.16.0      
+    ##  [9] matrixStats_1.3.0           GenomicRanges_1.56.0       
+    ## [11] GenomeInfoDb_1.40.0         IRanges_2.38.0             
+    ## [13] S4Vectors_0.42.0            BiocGenerics_0.50.0        
+    ## [15] lubridate_1.9.3             forcats_1.0.0              
+    ## [17] stringr_1.5.1               dplyr_1.1.4                
+    ## [19] purrr_1.0.2                 readr_2.1.5                
+    ## [21] tidyr_1.3.1                 tibble_3.2.1               
+    ## [23] ggplot2_3.5.1               tidyverse_2.0.0            
+    ## 
+    ## loaded via a namespace (and not attached):
+    ##  [1] fastmatch_1.1-4         gtable_0.3.5            xfun_0.43              
+    ##  [4] lattice_0.22-6          tzdb_0.4.0              vctrs_0.6.5            
+    ##  [7] tools_4.4.0             generics_0.1.3          parallel_4.4.0         
+    ## [10] fansi_1.0.6             highr_0.10              pkgconfig_2.0.3        
+    ## [13] Matrix_1.7-0            data.table_1.15.4       lifecycle_1.0.4        
+    ## [16] GenomeInfoDbData_1.2.12 farver_2.1.1            compiler_4.4.0         
+    ## [19] munsell_0.5.1           codetools_0.2-20        htmltools_0.5.8.1      
+    ## [22] yaml_2.3.8              pillar_1.9.0            crayon_1.5.2           
+    ## [25] BiocParallel_1.38.0     DelayedArray_0.30.0     abind_1.4-5            
+    ## [28] locfit_1.5-9.9          tidyselect_1.2.1        digest_0.6.35          
+    ## [31] stringi_1.8.3           labeling_0.4.3          cowplot_1.1.3          
+    ## [34] fastmap_1.1.1           grid_4.4.0              colorspace_2.1-0       
+    ## [37] cli_3.6.2               SparseArray_1.4.0       magrittr_2.0.3         
+    ## [40] S4Arrays_1.4.0          utf8_1.2.4              withr_3.0.0            
+    ## [43] scales_1.3.0            UCSC.utils_1.0.0        bit64_4.0.5            
+    ## [46] timechange_0.3.0        rmarkdown_2.26          XVector_0.44.0         
+    ## [49] httr_1.4.7              bit_4.0.5               hms_1.1.3              
+    ## [52] evaluate_0.23           knitr_1.46              rlang_1.1.3            
+    ## [55] Rcpp_1.0.12             glue_1.7.0              vroom_1.6.5            
+    ## [58] rstudioapi_0.16.0       jsonlite_1.8.8          R6_2.5.1               
+    ## [61] zlibbioc_1.50.0
+
+# Project 1 - Discussion Questions
+
+These questions are meant to help me assess how well I’ve conveyed some
+of the material as well as challenge you to think conceptually about
+some of the underlying science. Some of the questions have a definitive
+“right” answer while some of them are more open-ended and I’m just
+looking for your thought process and interpretation. All of these
+questions can be answered in a few sentences so do your best to be
+concise.
+
+Please copy these questions into your single Rmd or notebook that you’ve
+been working on your DE analysis. All of your analyses, writing, and
+answers to these questions should be in a single notebook.
+
+## RNAseq
+
+1.  List the major high-level steps of a basic RNAseq experiment to look
+    for differentially expressed genes. At each step, list what data you
+    need to perform each step and what format they are in (if
+    applicable). At minimum, there are 4 essential steps.
+
+Total RNA is extracted from biological samples and converted into cDNA
+libraries suitable for sequencing. The cDNA libraries are sequenced
+using a high-throughput platform to generate raw reads in FASTQ
+format.The raw reads are aligned to a reference genome or transcriptome
+to produce count data in formats like BAM or count matrices.Gene or
+transcript counts are statistically analyzed to identify differentially
+expressed genes using tools like DESeq2 or edgeR.
+
+1.  Extraction and library preparation
+
+2.  Sequencing
+
+3.  Read alignment and transcript quantification
+
+4.  DE analysis
+
+5.  Consider the following FastQC plot.
+
+``` r
+knitr::include_graphics("fastqc_plot.png")
+```
+
+<img src="fastqc_plot.png" width="890" />
+
+2a. What aspect of the data does this plot show?
+
+This plot shows the per-sequence GC content in an RNA-seq dataset
+compared to a theoretical normal distribution. This helps assess whether
+GC content across reads is consistent with expectations.
+
+2b. Make an interpretation of this plot assuming the data type was
+RNASeq.
+
+This plot shows two distinct peaks, and one that deviates greatly from
+the expected GC content. This could be a sign of a presence of
+contaminating sequences (such as rRNA).
+
+2c. Do you think this plot indicates there was a problem with the
+dataset? Explain your answer.
+
+This pattern suggests the presence of contaminants, biases in library
+prep, or technical artifacts, all of which can affect downstream
+analyses like expression quantification. with that being said, this
+likely indicates a problem with the dataset.
+
+2d. Make a hypothesis about what the problem represents. Outline a
+bioinformatics strategy that would enable you to confirm your
+hypothesis.
+
+I would predict that these high GC content reads are coming from rRNA
+contamination. To see if this is the case, I would separate reads based
+on GC content using a custom script or by using tools in Biopython.
+Then, I would BLAST these sequences to a reference rRNA database to
+check for rRNA contamination.
+
+3.  What is a splice-aware aligner? When is it important to use a
+    splice-aware aligner?
+
+A splice-aware aligner is a tool that can align RNA-seq reads across
+exon-exon junctions, recognizing that parts of a read may map to
+separate, non-contiguous regions of the genome due to splicing. It’s
+important to use a splice-aware aligner when aligning RNA-seq data to a
+reference genome because RNA-seq reads often span spliced introns, and
+non-splice-aware aligners would misalign or discard such reads.
+
+4.  What does a “gene-level” count as produced by VERSE or any other
+    counting tool in a RNAseq experiment represent?
+
+A gene-level count represents the number of sequencing reads that have
+been uniquely assigned to a specific gene based on how well they align
+to that gene’s exonic regions.
+
+VERSE maps aligned reads to annotated gene features from a GTF file, and
+sums up the reads that overlap exons for each gene. This provides a
+measure of gene expression that can be used in downstrad analyses like
+DE.
+
+5.  In your own words, briefly describe what information the matching
+    GTF for a reference genome stores.
+
+A Gene Transfer Format file contains detailed annotations for a
+reference genome. This includes locations of genes, exons, and other
+genomic features. This information enables accurate mapping of RNA-seq
+reads to specific transcripts during alignment and quantification
+
+6.  When counting alignments using VERSE or any other utility, why do we
+    need to provide the matching reference genome GTF file?
+
+We need to provide the matching GTF file to ensure that the counting
+tool knows where the genes, exons, and transcripts are located on the
+genome. This ensures precise gene-level quantification for downstream
+analysis like DE
+
+7.  Let’s pretend that this was a GSEA result from an experiment where
+    we treated 293T cells with a drug and compared changes in gene
+    expression to wild-type cells treated with a vehicle control. The
+    differential expression results are relative to the control cells
+    (i.e. a positive fold change means a gene is upregulated upon
+    treatment with the drug)
+
+Assume the following result is statistically significant with a positive
+NES (normalized enrichment score) and that it represents a GSEA
+experiment performed on the entire list of genes discovered in the
+experiment ranked by log2FoldChange (i.e. genes that are “upregulated”
+in the cells treated with drug are on the “left” and genes that are
+“downregulated” due to treatment are on the “right”).
+
+``` r
+knitr::include_graphics("gsea_plot.png")
+```
+
+<img src="gsea_plot.png" width="657" />
+
+7a. Form a valid interpretation / conclusion of the results shown in the
+plot given the above setup.
+
+The positive enrichment score peaking early and the concentration of
+vertical black bars (hits) bear thge top-ranked genes indicate that many
+of the genes involved in the acute inflammatory response are upregulated
+in response to the drug.
+
+7b. Now consider that all of the genes driving the enrichment are all
+activators of the inflammatory pathway. Does your interpretation change
+and if so, how?
+
+I would say that this would strengthen my interpretation. This is
+because if they are all activators, that the drug is likely activating
+the pathway itself. This is because activator genes directly drive the
+pathway’s function. This implies a functional induction of inflammation
+in the sample cell by the drug as opposed to a secondary effect.
+
+7c. Finally, consider that all of the genes driving the enrichment all
+function to inhibit inflammation. Does your interpretation change and if
+so, how?
+
+My interpretation changes significantly if this is the case. This
+suggests that the upregulation that the drug could be triggering a
+negative regulatory response, potentially supressing inflammation. This
+means that the direction of the biological effect is different even
+though the gene set is still enriched.
+
+8.  Rank the following quality control metrics for a 2x100nt paired-end
+    illumina mRNAseq dataset from most concerning to least concerning.
+    Provide a brief statement on where you ranked each and why. Assume
+    that the data has not been processed and was provided as-is from the
+    sequencing machine.
+
+- Unequal Read Lengths
+- Average PHRED score \< 20 in the last 10 bases
+- 15% of reads have identical sequences
+- 50% of reads are multimapped after alignment to the appro priate
+  genome
+- 10% of reads are unmapped after alignment to the appropriate genome
+- Non-random nucleotide distribution in the first 6 bases
+- Nucleotide frequencies of ACTG are not equal over the entire read
+- Unequal number of forward and reverse reads
+
+1.  Unequal read lengths This is the most concerning, as it could
+    indicate a sequencing or instrument error, as we would expect inform
+    read lengths in an 2x100nt illumina paired-end run.
+
+2.  Average PHRED score \< 20 in the last 10 bases I chose this as the
+    most detrimental because low base quality near the 3’ end can lead
+    to high error rates and misalignments. Trimming or filtering will be
+    necessary
+
+3.  50% of reads are multimapped after alignment to the appropriate
+    genome I chose this as the second most concercing because having 50%
+    multimapped can make gene assignment diffiult and can potentially
+    distort expression estimates.
+
+4.  15% of reads have identical sequences This level of duplication
+    suggests PCR over-amplification or adapter/contaminant sequences. If
+    unaddressed, it can bias expression analysis.
+
+5.  Non-random nucleotide distribution in the first 6 bases This could
+    indicate adapter biases or primier biases that cna be handled using
+    adapter trimming.
+
+6.  Unequal number of forward and reverse reads This can arise if reads
+    are of different qualities and are filtered more often than the
+    other
+
+7.  10% of reads are unmapped after alignment to the appropriate genome
+    While unmapped reads can indicate contamination or poor library
+    quality, a 10% rate is relatively low and may not significantly
+    affect overall results
+
+8.  Nucleotide frequencies of ACTG are not equal over the entire read
+    Some imbalance is common in RNA-seq due to transcript composition
+    and library prep. A mild skew won’t necessarily ruin alignment or
+    quantification unless it’s extreme.
