@@ -15,4 +15,4 @@ To run the nextflow pipeline:
   - When complete run:
    ```bash
    conda activate nextflow_base
-    ```
+   ```
