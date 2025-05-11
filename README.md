@@ -16,3 +16,8 @@ To run the nextflow pipeline:
    ```bash
    conda activate nextflow_base
    ```
+2. Run the pipeline:
+   - Run:
+   ```bash
+   nextflow run main.nf -profile singularity,cluster
+   ```
