@@ -25,9 +25,9 @@ To run the nextflow pipeline:
    ```
 
 ## Repo Structure:
-- /bin: Contains scripts used for custom Nextflow modules
-- /envs: Contains yml file for creating the nextflow_base conda environment that is required to the run the pipeline
-- /modules: Contains Nextflow modules for each pipeline step, including FastQC, STAR indexing and alignment, GTF parsing, read quantification with VERSE, MultiQC aggregation, and count matrix concatenation
+- bin/: Contains scripts used for custom Nextflow modules
+- envs/: Contains yml file for creating the nextflow_base conda environment that is required to the run the pipeline
+- modules/: Contains Nextflow modules for each pipeline step, including FastQC, STAR indexing and alignment, GTF parsing, read quantification with VERSE, MultiQC aggregation, and count matrix concatenation
 - analysis.rmd: R Markdown notebook used for downstream analysis, including differential expression with DESeq2, quality assessment, PCA, heatmaps, and functional enrichment using DAVID and fgsea
 - main.nf: Main Nextflow pipeline that runs all modules contained in /modules
 - nextflow.config: Configuration file that defines input paths, output directories, and reference files used in the pipeline. It also specifies execution profiles for running the workflow locally, with Conda/Singularity, or on an SGE cluster (e.g., SCC), including custom resource labels for different process intensities. The config ensures reproducibility and flexibility across computing environments
